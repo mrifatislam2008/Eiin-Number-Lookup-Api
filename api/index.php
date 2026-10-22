@@ -1,30 +1,25 @@
 <?php
 declare(strict_types=1);
 
-// EIIN EMIS API proxy — Vercel PHP runtime
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 
-function jsonResponse(int $statusCode, array $payload): void
+function jsonResponse(int $code, array $payload): void
 {
-    http_response_code($statusCode);
-    echo json_encode(
-        $payload,
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
-    );
+    http_response_code($code);
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
     exit;
 }
 
-// eiin parameter validation
 if (!isset($_GET['eiin']) || trim((string)$_GET['eiin']) === '') {
     jsonResponse(400, [
         'status' => false,
         'message' => 'eiin প্যারামিটার প্রয়োজন। উদাহরণ: ?eiin=104532'
     ]);
 }
-
 $eiin = trim((string)$_GET['eiin']);
-
 if (!ctype_digit($eiin)) {
     jsonResponse(400, [
         'status' => false,
@@ -32,39 +27,25 @@ if (!ctype_digit($eiin)) {
     ]);
 }
 
-/**
- * Build the full EMIS employee image URL from the old image path.
- */
 function buildImageUrl(string $oldPath, $empId): string
 {
     if ($oldPath === '' || $empId === null || $empId === '') {
         return $oldPath;
     }
-
     $parts = explode('/', $oldPath);
-    $fileName = end($parts);
-
-    // Encode path segments to avoid malformed URLs.
+    $fileName = (string)end($parts);
     return 'https://apps.emis.gov.bd:9701/api/public/hrm/file/view/'
         . rawurlencode((string)$empId) . '/'
-        . rawurlencode((string)$fileName) . '/10';
+        . rawurlencode($fileName) . '/10';
 }
 
-/**
- * Make an HTTP request to the upstream EMIS API.
- */
 function apiRequest(string $url, string $method, array $headers, ?string $body = null): array
 {
     if (!function_exists('curl_init')) {
-        return [
-            'response' => false,
-            'httpCode' => 0,
-            'error' => 'PHP cURL extension is not available in this runtime.'
-        ];
+        return ['response' => false, 'httpCode' => 0, 'error' => 'PHP cURL extension is unavailable'];
     }
 
     $ch = curl_init();
-
     $opts = [
         CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => true,
@@ -72,92 +53,66 @@ function apiRequest(string $url, string $method, array $headers, ?string $body =
         CURLOPT_MAXREDIRS => 3,
         CURLOPT_CONNECTTIMEOUT => 10,
         CURLOPT_TIMEOUT => 30,
-        // Keep TLS certificate validation enabled.
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
-        // Let cURL negotiate/decompress supported encodings.
         CURLOPT_ENCODING => '',
         CURLOPT_HTTPHEADER => $headers,
     ];
 
-    $method = strtoupper($method);
-
-    if ($method === 'PUT') {
+    if (strtoupper($method) === 'PUT') {
         $opts[CURLOPT_CUSTOMREQUEST] = 'PUT';
-        if ($body !== null) {
-            $opts[CURLOPT_POSTFIELDS] = $body;
-        }
-    } elseif ($method === 'POST') {
-        $opts[CURLOPT_POST] = true;
-        if ($body !== null) {
-            $opts[CURLOPT_POSTFIELDS] = $body;
-        }
+        if ($body !== null) $opts[CURLOPT_POSTFIELDS] = $body;
     } else {
         $opts[CURLOPT_HTTPGET] = true;
     }
 
     curl_setopt_array($ch, $opts);
-
     $response = curl_exec($ch);
     $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlErr = curl_error($ch);
-    curl_close($ch);
-
-    return [
-        'response' => $response,
-        'httpCode' => $httpCode,
-        'error' => $curlErr,
-    ];
+    $error = curl_error($ch);
+    // Do not call curl_close(): it is deprecated in PHP 8.5 and unnecessary in PHP 8+.
+    return ['response' => $response, 'httpCode' => $httpCode, 'error' => $error];
 }
 
-function decodeUpstreamJson(array $result, string $label): array
+function decodeResponse(array $result, string $label): array
 {
     if ($result['response'] === false) {
         jsonResponse(502, [
             'status' => false,
-            'message' => $label . ' API cURL error: ' . ($result['error'] ?: 'Unknown cURL error')
+            'message' => $label . ' API connection error',
+            'details' => $result['error'] ?: 'Unknown cURL error'
         ]);
     }
-
-    $httpCode = (int)($result['httpCode'] ?? 0);
-    if ($httpCode < 200 || $httpCode >= 300) {
+    if ($result['httpCode'] < 200 || $result['httpCode'] >= 300) {
         jsonResponse(502, [
             'status' => false,
-            'message' => $label . ' API returned an upstream HTTP error.',
-            'upstream_http_code' => $httpCode
+            'message' => $label . ' API returned an HTTP error',
+            'upstream_http_code' => $result['httpCode']
         ]);
     }
-
-    $decoded = json_decode((string)$result['response'], true);
-
-    if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
+    $data = json_decode((string)$result['response'], true);
+    if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
         jsonResponse(502, [
             'status' => false,
-            'message' => $label . ' API returned invalid JSON.'
+            'message' => $label . ' API returned invalid JSON'
         ]);
     }
-
-    return $decoded;
+    return $data;
 }
 
-/* ============================================================
-   1) Head / Principal / Vice Principal list (GET)
-   ============================================================ */
-$urlHead = 'https://apps.emis.gov.bd:9701/api/public/hrm/emp-info/get-head-by-institute-id/0/'
-    . rawurlencode($eiin) . '/0';
-
-$headHeaders = [
-    'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+$commonHeaders = [
+    'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     'Accept: application/json, text/plain, */*',
     'Origin: https://apps.emis.gov.bd',
     'Referer: https://apps.emis.gov.bd/',
     'Accept-Language: en-US,en;q=0.9',
 ];
 
-$headResult = apiRequest($urlHead, 'GET', $headHeaders);
-$headData = decodeUpstreamJson($headResult, 'Head');
+/* 1) Head / Principal list */
+$urlHead = 'https://apps.emis.gov.bd:9701/api/public/hrm/emp-info/get-head-by-institute-id/0/'
+    . rawurlencode($eiin) . '/0';
+$headData = decodeResponse(apiRequest($urlHead, 'GET', $commonHeaders), 'Head');
 
-// Normalize head list image URLs.
 if (isset($headData['data']) && is_array($headData['data'])) {
     foreach ($headData['data'] as &$item) {
         if (is_array($item) && !empty($item['image'])) {
@@ -168,46 +123,121 @@ if (isset($headData['data']) && is_array($headData['data'])) {
     unset($item);
 }
 
-/* ============================================================
-   2) Full employee list (PUT)
-   ============================================================ */
+/* 2) Employee list.
+ * Try the original intParam2=1 filter first. If it returns no rows, retry
+ * with other common filter states. The upstream API's parameter semantics
+ * are undocumented, so report the successful parameter instead of guessing.
+ * Pagination is followed only when the upstream response reports more pages.
+ */
 $urlList = 'https://apps.emis.gov.bd:9701/api/public/hrm/emp-info/get-pageable-emp-list-by-institute';
+$listHeaders = array_merge($commonHeaders, ['Content-Type: application/json']);
 
-$listHeaders = [
-    'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-    'Accept: application/json, text/plain, */*',
-    'Content-Type: application/json',
-    'Origin: https://apps.emis.gov.bd',
-    'Referer: https://apps.emis.gov.bd/',
-    'Accept-Language: en-US,en;q=0.9',
-];
+$filterCandidates = [1, null, 0, 2];
+$employeeList = null;
+$selectedFilter = null;
+$attemptSummary = [];
 
-$listBody = json_encode([
-    'listIntParam1' => [],
-    'page' => 0,
-    'size' => 1000,
-    'searchValue' => '',
-    'intParam1' => null,
-    'intParam2' => 1,
-    'stringParam1' => $eiin,
-], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+foreach ($filterCandidates as $filter) {
+    $allContent = [];
+    $firstPageData = null;
+    $page = 0;
+    $pageSize = 1000;
+    $reportedTotalPages = 1;
+    $reportedTotalElements = null;
+    $requestFailed = false;
 
-if ($listBody === false) {
-    jsonResponse(500, [
-        'status' => false,
-        'message' => 'Could not encode the employee-list request.'
-    ]);
+    do {
+        $bodyArray = [
+            'listIntParam1' => [],
+            'page' => $page,
+            'size' => $pageSize,
+            'searchValue' => '',
+            'intParam1' => null,
+            'intParam2' => $filter,
+            'stringParam1' => $eiin,
+        ];
+        $body = json_encode($bodyArray, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($body === false) {
+            jsonResponse(500, ['status' => false, 'message' => 'Could not encode employee-list request']);
+        }
+
+        $result = apiRequest($urlList, 'PUT', $listHeaders, $body);
+
+        // A filter attempt that fails upstream is recorded; do not expose raw upstream HTML.
+        if ($result['response'] === false || $result['httpCode'] < 200 || $result['httpCode'] >= 300) {
+            $requestFailed = true;
+            $attemptSummary[] = [
+                'intParam2' => $filter,
+                'page' => $page,
+                'upstream_http_code' => $result['httpCode'],
+                'error' => $result['error'] ?: null
+            ];
+            break;
+        }
+
+        $pageData = json_decode((string)$result['response'], true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($pageData)) {
+            $requestFailed = true;
+            $attemptSummary[] = [
+                'intParam2' => $filter,
+                'page' => $page,
+                'error' => 'Upstream returned invalid JSON'
+            ];
+            break;
+        }
+
+        if ($firstPageData === null) {
+            $firstPageData = $pageData;
+        }
+
+        $content = $pageData['data']['content'] ?? [];
+        if (is_array($content)) {
+            foreach ($content as $row) {
+                if (is_array($row)) $allContent[] = $row;
+            }
+        }
+
+        $reportedTotalPages = max(1, (int)($pageData['data']['totalPages'] ?? 1));
+        $reportedTotalElements = isset($pageData['data']['totalElements'])
+            ? (int)$pageData['data']['totalElements'] : null;
+
+        $page++;
+    } while ($page < $reportedTotalPages && $page < 20);
+
+    $attemptSummary[] = [
+        'intParam2' => $filter,
+        'rows_received' => count($allContent),
+        'reported_total_elements' => $reportedTotalElements,
+        'reported_total_pages' => $reportedTotalPages,
+        'request_failed' => $requestFailed
+    ];
+
+    if (!$requestFailed && count($allContent) > 0 && is_array($firstPageData)) {
+        $firstPageData['data']['content'] = $allContent;
+        $firstPageData['data']['totalElements'] = $reportedTotalElements ?? count($allContent);
+        $firstPageData['data']['returnedByApi'] = count($allContent);
+        $employeeList = $firstPageData;
+        $selectedFilter = $filter;
+        break;
+    }
+
+    // Keep the last valid response for diagnostics if no filter returns rows.
+    if (is_array($firstPageData)) {
+        $employeeList = $firstPageData;
+        $selectedFilter = $filter;
+    }
 }
 
-$listResult = apiRequest($urlList, 'PUT', $listHeaders, $listBody);
-$listData = decodeUpstreamJson($listResult, 'List');
+if (!is_array($employeeList)) {
+    $employeeList = [
+        'status' => false,
+        'message' => 'No valid employee-list response received',
+        'data' => ['content' => [], 'totalElements' => 0]
+    ];
+}
 
-// Normalize employee list image URLs.
-if (
-    isset($listData['data']['content'])
-    && is_array($listData['data']['content'])
-) {
-    foreach ($listData['data']['content'] as &$item) {
+if (isset($employeeList['data']['content']) && is_array($employeeList['data']['content'])) {
+    foreach ($employeeList['data']['content'] as &$item) {
         if (is_array($item) && !empty($item['image'])) {
             $empId = $item['id'] ?? $item['empRefId'] ?? null;
             $item['image'] = buildImageUrl((string)$item['image'], $empId);
@@ -216,14 +246,19 @@ if (
     unset($item);
 }
 
-/* ============================================================
-   3) Combined JSON response + original credits
-   ============================================================ */
+$employeeCount = count($employeeList['data']['content'] ?? []);
+
 jsonResponse(200, [
     'status' => true,
     'eiin' => $eiin,
     'headInfo' => $headData,
-    'employeeList' => $listData,
+    'employeeList' => $employeeList,
+    'employeeListCount' => $employeeCount,
+    'employeeListFilterUsed' => $selectedFilter,
+    'employeeListDiagnostics' => $attemptSummary,
+    'note' => $employeeCount === 0
+        ? 'EMIS employee-list endpoint returned no rows for the tested filter values. The endpoint may use another required parameter, or the public endpoint may not expose employee rows for this EIIN.'
+        : null,
     'Api_Owner' => '@Al_Nayeem756',
     'Telegram' => '@Cyber_Force756',
     'Developer' => '@Al_Nayeem756',
