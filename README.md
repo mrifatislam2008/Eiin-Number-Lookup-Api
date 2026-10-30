@@ -1,74 +1,75 @@
 
 # EIIN Information API
 
-Version: 3.2.0
+A PHP API for retrieving institute head information
+and employee records from Bangladesh EMIS.
 
-A PHP API that retrieves institute head information and employee records
-from the Bangladesh EMIS service.
+## Features
 
-## Project Structure
+- EIIN lookup
+- Head information
+- Employee list
+- Pagination
+- Search
+- Designation filtering
+- JSON response
+- CSV export
+- Health check
+- Optional API key
+- Private contact fields excluded
 
-- api/index.php
-- api/health.php
-- lib/EiinApi.php
-- vercel.json
+## Endpoints
 
-## Main Endpoint
+### Complete information
 
-GET /
+GET /api/index.php?eiin=120617
 
-Required:
-- eiin
+### Head information only
 
-Optional:
-- type=all|head|employees
-- page=0
-- size=100
-- maxPages=1
-- search=
-- designation=
-- format=json|csv
+GET /api/index.php?eiin=120617&type=head
 
-## Examples
+### Employee list only
 
-?eiin=104532
+GET /api/index.php?eiin=120617&type=employees
 
-?eiin=104532&type=head
+### Pagination
 
-?eiin=104532&type=employees
+GET /api/index.php?eiin=120617&page=0&size=100&maxPages=3
 
-?eiin=104532&page=1&size=100
+### Search
 
-?eiin=104532&format=csv&maxPages=3
+GET /api/index.php?eiin=120617&search=headmaster
 
-?eiin=104532&designation=Teacher
+### Designation filter
 
-?eiin=104532&search=Rifat
+GET /api/index.php?eiin=120617&designation=teacher
 
-## Health Check
+### CSV export
 
-/api/health
+GET /api/index.php?eiin=120617&format=csv
 
-## API Key
+### Health check
 
-Optional Vercel environment variable:
+GET /api/health
 
-API_KEY
+## Optional API Key
 
-When configured, send:
+Set API_KEY in Vercel Project Settings > Environment
+Variables.
 
-X-API-Key: YOUR_SECRET_KEY
+Send it using the X-API-Key request header.
+
+If API_KEY is not configured, authentication is disabled.
+
+## Deployment
+
+1. Upload the complete project to GitHub.
+2. Connect the repository to Vercel.
+3. Set the project root to the repository root.
+4. Deploy.
 
 ## Important
 
-- Page numbering starts at 0.
-- JSON mode fetches one page.
-- CSV mode can fetch up to 5 pages.
-- Search and designation filters apply only to fetched records.
-- CSV contains an allowlist of professional fields only.
-- Upstream EMIS response availability and structure may change.
-
-## Original Credits
-
-@Al_Nayeem756
-@Cyber_Force756
+The employee list depends on the upstream EMIS API.
+An empty upstream result will remain an empty employee list.
+This API does not create or fabricate employee records.
