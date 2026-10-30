@@ -1,123 +1,67 @@
 <?php
-
 /*
  * EIIN Information API
- * Upstream: Bangladesh EMIS
- * Original credits: @Al_Nayeem756 / @Cyber_Force756
+ * Original credits: @Al_Nayeem756
+ * Telegram: https://t.me/Cyber_Force756
+ * Developer: @Cyber_Force756
  */
 
 const EMIS_BASE = 'https://apps.emis.gov.bd:9701/api/public/hrm';
-const API_OWNER = '@Al_Nayeem756';
-const TELEGRAM = 'https://t.me/Cyber_Force756';
-const DEVELOPER = '@Cyber_Force756';
 
-/**
- * Send JSON response and stop execution.
- */
-function jsonResponse($data, $status = 200)
+function jsonResponse(array $data, int $status = 200): void
 {
-    http_response_code((int) $status);
+    http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
-
     echo json_encode(
         $data,
         JSON_UNESCAPED_UNICODE |
         JSON_UNESCAPED_SLASHES |
         JSON_INVALID_UTF8_SUBSTITUTE
     );
-
     exit;
 }
 
-/**
- * Unicode lowercase fallback.
- */
-function safeLower($value)
-{
-    $value = (string) $value;
+function emisRequest(
+    string $url,
+    string $method = 'GET',
+    ?array $body = null
+): array {
+    $ch = curl_init($url);
 
-    if (function_exists('mb_strtolower')) {
-        return mb_strtolower($value, 'UTF-8');
-    }
-
-    return strtolower($value);
-}
-
-/**
- * Optional API key authentication.
- */
-function requireApiKey()
-{
-    $requiredKey = getenv('API_KEY');
-
-    if ($requiredKey === false || $requiredKey === '') {
-        return;
-    }
-
-    $providedKey = isset($_SERVER['HTTP_X_API_KEY'])
-        ? (string) $_SERVER['HTTP_X_API_KEY']
-        : '';
-
-    if (!hash_equals((string) $requiredKey, $providedKey)) {
-        jsonResponse([
-            'success' => false,
-            'error' => 'Unauthorized. Invalid API key.'
-        ], 401);
-    }
-}
-
-/**
- * Send request to EMIS.
- */
-function apiRequest($method, $url, $body = null)
-{
-    if (!function_exists('curl_init')) {
-        throw new Exception('PHP cURL extension is unavailable.');
-    }
-
-    $ch = curl_init();
-
-    if ($ch === false) {
-        throw new Exception('Unable to initialize cURL.');
+    if (!$ch) {
+        return [
+            'ok' => false,
+            'status' => 0,
+            'data' => null,
+            'error' => 'Could not initialize cURL'
+        ];
     }
 
     $headers = [
         'Accept: application/json',
-        'User-Agent: EIIN-Information-API/3.2'
+        'Accept-Encoding: identity',
+        'User-Agent: EIIN-Information-API/1.0'
     ];
 
     $options = [
-        CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_CONNECTTIMEOUT => 12,
-        CURLOPT_TIMEOUT => 35,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 15,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_ENCODING => '',
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_CUSTOMREQUEST => strtoupper($method)
+        CURLOPT_HTTPHEADER => $headers
     ];
 
-    if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
-        $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTPS;
-    }
-
-    if ($body !== null) {
-        $jsonBody = json_encode(
-            $body,
-            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    if ($method === 'PUT') {
+        $options[CURLOPT_CUSTOMREQUEST] = 'PUT';
+        $options[CURLOPT_POSTFIELDS] = json_encode(
+            $body ?? [],
+            JSON_UNESCAPED_UNICODE
         );
-
-        if ($jsonBody === false) {
-            unset($ch);
-            throw new Exception('Could not encode upstream request.');
-        }
-
-        $headers[] = 'Content-Type: application/json';
-        $options[CURLOPT_HTTPHEADER] = $headers;
-        $options[CURLOPT_POSTFIELDS] = $jsonBody;
+        $options[CURLOPT_HTTPHEADER][] =
+            'Content-Type: application/json';
     }
 
     curl_setopt_array($ch, $options);
@@ -126,255 +70,231 @@ function apiRequest($method, $url, $body = null)
     $curlError = curl_error($ch);
     $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-    unset($ch);
+    curl_close($ch);
 
     if ($raw === false) {
-        throw new Exception('Upstream connection failed: ' . $curlError);
+        return [
+            'ok' => false,
+            'status' => $httpCode,
+            'data' => null,
+            'error' => $curlError ?: 'Connection failed'
+        ];
     }
 
-    $decoded = json_decode((string) $raw, true);
+    $decoded = json_decode($raw, true);
 
     if (!is_array($decoded)) {
-        throw new Exception(
-            'Upstream returned invalid JSON. HTTP ' . $httpCode
-        );
+        return [
+            'ok' => false,
+            'status' => $httpCode,
+            'data' => null,
+            'error' => 'Upstream returned invalid JSON'
+        ];
     }
 
-    if ($httpCode < 200 || $httpCode >= 300) {
-        throw new Exception(
-            'Upstream returned HTTP ' . $httpCode
-        );
-    }
-
-    return $decoded;
+    return [
+        'ok' => $httpCode >= 200 && $httpCode < 300,
+        'status' => $httpCode,
+        'data' => $decoded,
+        'error' => $httpCode >= 200 && $httpCode < 300
+            ? null
+            : 'Upstream HTTP error'
+    ];
 }
 
-/**
- * Fetch institute head information.
- */
-function getHeadInfo($eiin)
+function removePrivateFields($value)
+{
+    $privateKeys = [
+        'mobileno',
+        'mobile',
+        'phone',
+        'phonenumber',
+        'email',
+        'nid',
+        'nationalid',
+        'dateofbirth',
+        'dob',
+        'address',
+        'personaladdress'
+    ];
+
+    if (!is_array($value)) {
+        return $value;
+    }
+
+    $clean = [];
+
+    foreach ($value as $key => $item) {
+        $normalized = strtolower(
+            preg_replace('/[^a-zA-Z0-9]/', '', (string) $key)
+        );
+
+        if (in_array($normalized, $privateKeys, true)) {
+            continue;
+        }
+
+        $clean[$key] = removePrivateFields($item);
+    }
+
+    return $clean;
+}
+
+function getHeadInfo(string $eiin): array
 {
     $url = EMIS_BASE .
         '/emp-info/get-head-by-institute-id/0/' .
-        rawurlencode((string) $eiin) .
-        '/0';
+        rawurlencode($eiin) . '/0';
 
-    return apiRequest('GET', $url);
+    return emisRequest($url);
 }
 
-/**
- * Fetch one employee page.
- */
-function getEmployeePage($eiin, $page, $size)
+function getEmployeePage(string $eiin, int $page, int $size): array
 {
     $url = EMIS_BASE .
         '/emp-info/get-pageable-emp-list-by-institute';
 
     $body = [
         'listIntParam1' => [],
-        'page' => (int) $page,
-        'size' => (int) $size,
+        'page' => $page,
+        'size' => $size,
         'searchValue' => '',
         'intParam1' => null,
         'intParam2' => 1,
-        'stringParam1' => (string) $eiin
+        'stringParam1' => $eiin
     ];
 
-    return apiRequest('PUT', $url, $body);
+    return emisRequest($url, 'PUT', $body);
 }
 
-/**
- * Extract employee content.
- */
-function getEmployeeContent($response)
+function safeLower(string $value): string
 {
-    $content = $response['data']['content'] ?? [];
-
-    return is_array($content) ? $content : [];
+    return function_exists('mb_strtolower')
+        ? mb_strtolower($value, 'UTF-8')
+        : strtolower($value);
 }
 
-/**
- * Read total pages from upstream.
- */
-function getTotalPages($response)
+function getEmployeeContent(array $response): array
 {
-    $value = $response['data']['totalPages'] ?? null;
+    $data = $response['data'] ?? [];
 
-    return is_numeric($value) ? max(0, (int) $value) : null;
-}
-
-/**
- * Read last-page flag from upstream.
- */
-function getLastPageFlag($response)
-{
-    $value = $response['data']['last'] ?? null;
-
-    return is_bool($value) ? $value : null;
-}
-
-/**
- * Build employee image URL when source fields are available.
- */
-function buildImageUrl($employee)
-{
-    $empId = $employee['empId']
-        ?? $employee['employeeId']
-        ?? $employee['id']
-        ?? null;
-
-    $filename = $employee['filename']
-        ?? $employee['fileName']
-        ?? $employee['photoName']
-        ?? $employee['imageName']
-        ?? null;
-
-    if ($empId === null || $filename === null) {
-        return null;
+    if (isset($data['content']) && is_array($data['content'])) {
+        return $data['content'];
     }
 
-    $empId = trim((string) $empId);
-    $filename = trim((string) $filename);
-
-    if ($empId === '' || $filename === '') {
-        return null;
+    if (is_array($data) && array_is_list($data)) {
+        return $data;
     }
 
-    return EMIS_BASE . '/file/view/' .
-        rawurlencode($empId) . '/' .
-        rawurlencode($filename) . '/10';
+    return [];
 }
 
-/**
- * Create searchable text from professional fields only.
- */
-function employeeSearchText($employee)
-{
-    $keys = [
-        'name',
-        'employeeName',
-        'empName',
-        'designation',
-        'designationName',
-        'subject',
-        'subjectName',
-        'instituteName'
-    ];
+function filterEmployees(
+    array $employees,
+    string $search,
+    string $designation
+): array {
+    return array_values(array_filter(
+        $employees,
+        function ($employee) use ($search, $designation) {
+            if (!is_array($employee)) {
+                return false;
+            }
 
-    $parts = [];
-
-    foreach ($keys as $key) {
-        if (isset($employee[$key]) && is_scalar($employee[$key])) {
-            $parts[] = (string) $employee[$key];
-        }
-    }
-
-    return safeLower(implode(' ', $parts));
-}
-
-/**
- * Apply local search and designation filters.
- */
-function filterEmployees($employees, $search, $designation)
-{
-    $search = safeLower(trim((string) $search));
-    $designation = safeLower(trim((string) $designation));
-
-    if ($search === '' && $designation === '') {
-        return $employees;
-    }
-
-    $filtered = [];
-
-    foreach ($employees as $employee) {
-        if (!is_array($employee)) {
-            continue;
-        }
-
-        $searchText = employeeSearchText($employee);
-
-        if ($search !== '' && strpos($searchText, $search) === false) {
-            continue;
-        }
-
-        if ($designation !== '') {
-            $designationText = safeLower(
-                (string) (
-                    $employee['designation']
-                    ?? $employee['designationName']
-                    ?? ''
-                )
+            $name = safeLower(
+                (string) ($employee['empName'] ?? '') . ' ' .
+                (string) ($employee['empNameBn'] ?? '')
             );
 
-            if (strpos($designationText, $designation) === false) {
-                continue;
+            $job = safeLower(
+                (string) ($employee['designationName'] ?? '') . ' ' .
+                (string) ($employee['designationNameBn'] ?? '')
+            );
+
+            if (
+                $search !== '' &&
+                strpos($name . ' ' . $job, safeLower($search)) === false
+            ) {
+                return false;
             }
+
+            if (
+                $designation !== '' &&
+                strpos($job, safeLower($designation)) === false
+            ) {
+                return false;
+            }
+
+            return true;
         }
-
-        $filtered[] = $employee;
-    }
-
-    return $filtered;
+    ));
 }
 
-/**
- * Export only approved professional fields to CSV.
- * Private personal information is deliberately excluded.
- */
-function exportEmployeesCsv($employees)
+function csvCell($value): string
 {
-    $fieldMap = [
-        'Employee ID' => ['empId', 'employeeId'],
-        'Name' => ['name', 'employeeName', 'empName'],
-        'Designation' => ['designation', 'designationName'],
-        'Subject' => ['subject', 'subjectName'],
-        'Institute' => ['instituteName'],
-        'Image URL' => ['imageUrl']
-    ];
+    $value = (string) ($value ?? '');
+
+    if (preg_match('/^[\s]*[=+\-@]/u', $value)) {
+        return "'" . $value;
+    }
+
+    return $value;
+}
+
+function exportEmployeesCsv(array $employees, string $eiin): void
+{
+    $filename = 'eiin-' .
+        preg_replace('/[^0-9]/', '', $eiin) .
+        '-employees.csv';
 
     header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="eiin-employees.csv"');
+    header(
+        'Content-Disposition: attachment; filename="' .
+        $filename . '"'
+    );
     header('Cache-Control: no-store');
 
-    $output = fopen('php://output', 'w');
-
-    if ($output === false) {
-        exit;
-    }
+    $out = fopen('php://output', 'w');
 
     // UTF-8 BOM for spreadsheet compatibility.
-    fwrite($output, "\xEF\xBB\xBF");
+    fwrite($out, "\xEF\xBB\xBF");
 
-    fputcsv($output, array_keys($fieldMap));
+    fputcsv($out, [
+        'Employee ID',
+        'Employee Name',
+        'Employee Name (Bangla)',
+        'Designation',
+        'Designation (Bangla)'
+    ]);
 
     foreach ($employees as $employee) {
-        if (!is_array($employee)) {
-            continue;
-        }
-
-        $row = [];
-
-        foreach ($fieldMap as $possibleKeys) {
-            $value = '';
-
-            foreach ($possibleKeys as $key) {
-                if (isset($employee[$key]) && is_scalar($employee[$key])) {
-                    $value = (string) $employee[$key];
-                    break;
-                }
-            }
-
-            // Prevent spreadsheet formula injection.
-            if (preg_match('/^[\s]*[=+\-@]/u', $value)) {
-                $value = "'" . $value;
-            }
-
-            $row[] = $value;
-        }
-
-        fputcsv($output, $row);
+        fputcsv($out, [
+            csvCell($employee['empRefId'] ?? $employee['id'] ?? ''),
+            csvCell($employee['empName'] ?? ''),
+            csvCell($employee['empNameBn'] ?? ''),
+            csvCell($employee['designationName'] ?? ''),
+            csvCell($employee['designationNameBn'] ?? '')
+        ]);
     }
 
-    fclose($output);
+    fclose($out);
     exit;
+}
+
+function requireApiKey(): void
+{
+    $expected = getenv('API_KEY');
+
+    // Authentication remains optional unless API_KEY is configured.
+    if (!$expected) {
+        return;
+    }
+
+    $provided = $_SERVER['HTTP_X_API_KEY'] ?? '';
+
+    if (!hash_equals($expected, $provided)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Unauthorized'
+        ], 401);
+    }
 }
