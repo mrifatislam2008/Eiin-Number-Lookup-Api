@@ -1,4 +1,3 @@
-
 <?php
 
 require_once __DIR__ . '/../lib/EiinApi.php';
