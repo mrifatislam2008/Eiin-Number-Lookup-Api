@@ -6,241 +6,257 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-API-Key');
 
-$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-
-if ($method === 'OPTIONS') {
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(204);
     exit;
 }
 
-if ($method !== 'GET') {
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonResponse([
         'success' => false,
-        'error' => 'Only GET requests are allowed.'
+        'error' => 'Only GET requests are supported'
     ], 405);
 }
 
 requireApiKey();
 
-// Validate EIIN.
 $eiin = trim((string) ($_GET['eiin'] ?? ''));
 
-if ($eiin === '' || !preg_match('/^[0-9]{1,15}$/', $eiin)) {
+if ($eiin === '' || !preg_match('/^[0-9]{1,20}$/', $eiin)) {
     jsonResponse([
         'success' => false,
-        'error' => 'A valid numeric EIIN parameter is required.',
-        'example' => '?eiin=104532'
+        'error' => 'A valid numeric EIIN is required',
+        'example' => '?eiin=120617'
     ], 400);
 }
 
-// Validate type.
-$type = strtolower(trim((string) ($_GET['type'] ?? 'all')));
+$type = strtolower((string) ($_GET['type'] ?? 'all'));
 
 if (!in_array($type, ['all', 'head', 'employees'], true)) {
     jsonResponse([
         'success' => false,
-        'error' => 'Invalid type. Use all, head, or employees.'
+        'error' => 'Invalid type',
+        'allowed' => ['all', 'head', 'employees']
     ], 400);
 }
 
-// Validate pagination.
-$page = filter_var($_GET['page'] ?? 0, FILTER_VALIDATE_INT);
-$size = filter_var($_GET['size'] ?? 100, FILTER_VALIDATE_INT);
-$maxPages = filter_var($_GET['maxPages'] ?? 1, FILTER_VALIDATE_INT);
-
-if ($page === false || $page < 0) {
-    jsonResponse([
-        'success' => false,
-        'error' => 'page must be 0 or greater.'
-    ], 400);
-}
-
-if ($size === false || $size < 1 || $size > 1000) {
-    jsonResponse([
-        'success' => false,
-        'error' => 'size must be between 1 and 1000.'
-    ], 400);
-}
-
-if ($maxPages === false || $maxPages < 1 || $maxPages > 5) {
-    jsonResponse([
-        'success' => false,
-        'error' => 'maxPages must be between 1 and 5.'
-    ], 400);
-}
+$page = max(0, (int) ($_GET['page'] ?? 0));
+$size = min(100, max(1, (int) ($_GET['size'] ?? 100)));
+$maxPages = min(5, max(1, (int) ($_GET['maxPages'] ?? 3)));
 
 $search = trim((string) ($_GET['search'] ?? ''));
 $designation = trim((string) ($_GET['designation'] ?? ''));
-$format = strtolower(trim((string) ($_GET['format'] ?? 'json')));
+
+$format = strtolower((string) ($_GET['format'] ?? 'json'));
 
 if (!in_array($format, ['json', 'csv'], true)) {
     jsonResponse([
         'success' => false,
-        'error' => 'format must be json or csv.'
+        'error' => 'Invalid format. Use json or csv.'
     ], 400);
 }
 
-if ($format === 'csv' && $type === 'head') {
-    jsonResponse([
-        'success' => false,
-        'error' => 'CSV export is available for employee data only.'
-    ], 400);
-}
+$headResult = null;
+$employeeResult = null;
 
 $headInfo = null;
-$employeeResponse = null;
-$employees = [];
+$employeeList = null;
 
-$pagesFetched = 0;
+$headOk = null;
+$employeeOk = null;
+
+if ($type === 'all' || $type === 'head') {
+    $headResult = getHeadInfo($eiin);
+    $headOk = $headResult['ok'];
+
+    if ($headOk) {
+        $headInfo = removePrivateFields($headResult['data']);
+    }
+}
+
+$allEmployees = [];
+$lastEmployeeData = [];
 $totalPages = null;
 $totalElements = null;
-$isLastPage = null;
-$paginationComplete = false;
+$pagesFetched = 0;
+$employeeError = null;
+$employeeHttpStatus = null;
 
-try {
-    // Fetch institute head information.
-    if ($type === 'all' || $type === 'head') {
-        $headInfo = getHeadInfo($eiin);
-    }
+if ($type === 'all' || $type === 'employees') {
+    $employeeOk = true;
 
-    // Fetch employee information.
-    if ($type === 'all' || $type === 'employees') {
-        $pagesToFetch = ($format === 'csv')
-            ? (int) $maxPages
-            : 1;
+    for ($i = 0; $i < $maxPages; $i++) {
+        $currentPage = $page + $i;
 
-        for ($i = 0; $i < $pagesToFetch; $i++) {
-            $currentPage = (int) $page + $i;
+        $employeeResult = getEmployeePage(
+            $eiin,
+            $currentPage,
+            $size
+        );
 
-            $employeeResponse = getEmployeePage(
-                $eiin,
-                $currentPage,
-                (int) $size
-            );
+        $employeeHttpStatus = $employeeResult['status'];
 
-            $pageEmployees = getEmployeeContent($employeeResponse);
-            $pagesFetched++;
+        if (!$employeeResult['ok']) {
+            $employeeOk = false;
+            $employeeError = $employeeResult['error'];
+            break;
+        }
 
-            foreach ($pageEmployees as $employee) {
-                if (!is_array($employee)) {
-                    continue;
-                }
+        $lastEmployeeData = $employeeResult['data'];
+        $pagesFetched++;
 
-                $imageUrl = buildImageUrl($employee);
+        $content = getEmployeeContent($lastEmployeeData);
 
-                if ($imageUrl !== null) {
-                    $employee['imageUrl'] = $imageUrl;
-                }
-
-                $employees[] = $employee;
-            }
-
-            $totalPages = getTotalPages($employeeResponse);
-            $isLastPage = getLastPageFlag($employeeResponse);
-
-            $totalElements =
-                $employeeResponse['data']['totalElements'] ?? null;
-
-            if ($isLastPage === true) {
-                break;
-            }
-
-            if (
-                $totalPages !== null &&
-                ($currentPage + 1) >= $totalPages
-            ) {
-                break;
-            }
-
-            if (
-                $totalPages === null &&
-                $isLastPage === null &&
-                count($pageEmployees) < (int) $size
-            ) {
-                break;
+        foreach ($content as $employee) {
+            if (is_array($employee)) {
+                $allEmployees[] = removePrivateFields($employee);
             }
         }
 
-        $paginationComplete = (
-            (int) $page === 0 &&
-            $totalPages !== null &&
-            $pagesFetched >= $totalPages
-        );
-    }
+        $paginationData = $lastEmployeeData['data'] ?? [];
 
-    // Head-only response.
+        $totalPages = isset($paginationData['totalPages'])
+            ? (int) $paginationData['totalPages']
+            : null;
+
+        $totalElements = isset($paginationData['totalElements'])
+            ? (int) $paginationData['totalElements']
+            : null;
+
+        // Stop when upstream says there are no more pages.
+        if ($totalPages !== null && $currentPage + 1 >= $totalPages) {
+            break;
+        }
+
+        if ($totalPages === null && count($content) < $size) {
+            break;
+        }
+
+        if (count($content) === 0) {
+            break;
+        }
+    }
+}
+
+$filteredEmployees = filterEmployees(
+    $allEmployees,
+    $search,
+    $designation
+);
+
+if ($format === 'csv') {
     if ($type === 'head') {
         jsonResponse([
-            'success' => true,
-            'eiin' => $eiin,
-            'headInfo' => $headInfo,
-            'Api_Owner' => API_OWNER,
-            'Telegram' => TELEGRAM,
-            'Developer' => DEVELOPER
-        ]);
+            'success' => false,
+            'error' => 'CSV export is available for employee records'
+        ], 400);
     }
 
-    // Apply local filters to fetched records.
-    $filteredEmployees = filterEmployees(
-        $employees,
-        $search,
-        $designation
-    );
-
-    // CSV response.
-    if ($format === 'csv') {
-        exportEmployeesCsv($filteredEmployees);
+    if ($employeeOk === false) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Could not retrieve employee records',
+            'upstreamStatus' => $employeeHttpStatus
+        ], 502);
     }
 
-    // Preserve upstream response structure.
-    if ($employeeResponse !== null) {
-        if (
-            !isset($employeeResponse['data']) ||
-            !is_array($employeeResponse['data'])
-        ) {
-            $employeeResponse['data'] = [];
-        }
+    exportEmployeesCsv($filteredEmployees, $eiin);
+}
 
-        $employeeResponse['data']['content'] = $filteredEmployees;
+if ($type === 'all' || $type === 'employees') {
+    $employeeList = $lastEmployeeData;
+
+    if (!is_array($employeeList)) {
+        $employeeList = [];
     }
 
-    jsonResponse([
-        'success' => true,
-        'eiin' => $eiin,
-        'headInfo' => $headInfo,
-        'employeeList' => $employeeResponse,
+    if (!isset($employeeList['data']) ||
+        !is_array($employeeList['data'])) {
+        $employeeList['data'] = [];
+    }
 
-        'pagination' => [
-            'requestedPage' => (int) $page,
-            'size' => (int) $size,
-            'pagesFetched' => $pagesFetched,
-            'totalPages' => $totalPages,
-            'totalElements' => $totalElements,
-            'fetchedEmployees' => count($employees),
-            'returnedEmployees' => count($filteredEmployees),
-            'isLastPage' => $isLastPage,
-            'completeFromFirstPage' => $paginationComplete
-        ],
+    $employeeList['data']['content'] = $filteredEmployees;
+    $employeeList = removePrivateFields($employeeList);
+}
 
-        'filters' => [
-            'search' => $search,
-            'designation' => $designation,
-            'appliedTo' => 'fetchedRecordsOnly'
-        ],
+$paginationComplete = (
+    $page === 0 &&
+    $totalPages !== null &&
+    ($totalPages === 0 || $pagesFetched >= $totalPages)
+);
 
-        'Api_Owner' => API_OWNER,
-        'Telegram' => TELEGRAM,
-        'Developer' => DEVELOPER
-    ]);
+$requestedDataSucceeded = (
+    ($type === 'head' && $headOk === true) ||
+    ($type === 'employees' && $employeeOk === true) ||
+    (
+        $type === 'all' &&
+        ($headOk === true || $employeeOk === true)
+    )
+);
 
-} catch (Throwable $e) {
-    // Detailed error goes to Vercel function logs.
-    error_log('[EIIN API] ' . $e->getMessage());
-
+if (!$requestedDataSucceeded) {
     jsonResponse([
         'success' => false,
-        'error' => 'Unable to retrieve information from EMIS.',
-        'eiin' => $eiin,
-        'hint' => 'Check the Vercel function logs or try again later.'
+        'error' => 'Could not retrieve requested EMIS information',
+        'diagnostics' => [
+            'headHttpStatus' => $headResult['status'] ?? null,
+            'employeeHttpStatus' => $employeeHttpStatus,
+            'headError' => $headResult['error'] ?? null,
+            'employeeError' => $employeeError
+        ]
     ], 502);
 }
+
+$response = [
+    'success' => true,
+    'eiin' => $eiin,
+    'headInfo' => $headInfo,
+    'employeeList' => $employeeList,
+    'pagination' => [
+        'requestedPage' => $page,
+        'size' => $size,
+        'maxPages' => $maxPages,
+        'pagesFetched' => $pagesFetched,
+        'totalPages' => $totalPages,
+        'totalElements' => $totalElements,
+        'fetchedEmployees' => count($allEmployees),
+        'returnedEmployees' => count($filteredEmployees),
+        'isLastPage' => $totalPages !== null
+            ? ($page + $pagesFetched >= $totalPages)
+            : null,
+        'completeFromFirstPage' => $paginationComplete,
+        'noEmployeesReportedByUpstream' => $totalElements === 0
+    ],
+    'filters' => [
+        'search' => $search,
+        'designation' => $designation,
+        'appliedTo' => 'fetchedRecordsOnly'
+    ],
+    'diagnostics' => [
+        'headHttpStatus' => $headResult['status'] ?? null,
+        'employeeHttpStatus' => $employeeHttpStatus,
+        'headRequestSucceeded' => $headOk,
+        'employeeRequestSucceeded' => $employeeOk,
+        'employeeError' => $employeeError
+    ],
+    'Api_Owner' => '@Al_Nayeem756',
+    'Telegram' => 'https://t.me/Cyber_Force756',
+    'Developer' => '@Cyber_Force756'
+];
+
+if ($type === 'head') {
+    $response['employeeList'] = null;
+}
+
+if ($type === 'employees') {
+    $response['headInfo'] = null;
+}
+
+if (
+    $type === 'all' &&
+    ($headOk === false || $employeeOk === false)
+) {
+    $response['partial'] = true;
+}
+
+jsonResponse($response);
